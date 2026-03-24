@@ -269,13 +269,13 @@ def run_direct_drive():
     print(f"论文trial b参考值：E ≈ 0.00051，残差 ≈ 0.08 m/s")
 
     # --- 可视化 ---
-    plot_results(t_common, vb_pred, vb_meas, theta, cs_theta, cs_leg, cs_trunk, cs_arm, PARAMS)
-    plot_results_full(t_common, vb_pred, vb_meas, F_meas, xBF, xSB, theta, cs_theta)
+    plot_results(t_common, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm, PARAMS)
+    # plot_results_full(t_common, vb_pred, vb_meas, F_meas, xBF, xSB, theta, cs_theta)
 
     return vb_pred, E_vb
 
 
-def plot_results(t, vb_pred, vb_meas, theta, cs_theta, cs_leg, cs_trunk, cs_arm, params):
+def plot_results(t, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm, params):
     """对照论文图4的格式绘图"""
     plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
     plt.rcParams['axes.unicode_minus'] = False
@@ -290,15 +290,12 @@ def plot_results(t, vb_pred, vb_meas, theta, cs_theta, cs_leg, cs_trunk, cs_arm,
 
     # 桨角（验证θ导数是否合理）
     theta_rad, theta_dot, theta_ddot = compute_theta_from_splines(t, cs_leg, cs_trunk, cs_arm, params)
-    # theta_dot = cs_theta.derivative(1)(t)
 
     axes[1].plot(t, np.degrees(theta), 'k-', linewidth=2, label='实测桨角')
+    axes[1].plot(t, np.degrees(theta_rad), 'r--', linewidth=1.5, label='模型预测')
     axes[1].set_ylabel('桨角 (°)')
     axes[1].legend(loc='upper left')
     axes[1].grid(True, alpha=0.3)
-    ax2 = axes[1].twinx()
-    ax2.plot(t, theta_dot, 'r-', linewidth=1, alpha=0.5, label='θ̇（rad/s）')
-    ax2.set_ylabel('桨角速度 (rad/s)', color='r')
 
     axes[-1].set_xlabel('时间 (s)')
     plt.tight_layout()
@@ -323,14 +320,12 @@ def plot_results_full(t, vb_pred, vb_meas, f_meas, x_bf, x_sb, theta, cs_theta):
 
     def mark_events(ax):
         for idx in catch_idx:
-            ax.axvline(t[idx], color='b', linestyle='--',
-                       linewidth=0.8, alpha=0.6, label='入水')
+            ax.axvline(t[idx], color='b', linestyle='--', linewidth=0.8, alpha=0.6, label='入水')
         for idx in release_idx:
-            ax.axvline(t[idx], color='r', linestyle='--',
-                       linewidth=0.8, alpha=0.6, label='出水')
+            ax.axvline(t[idx], color='r', linestyle='--', linewidth=0.8, alpha=0.6, label='出水')
 
     # ── 子图1：船速 ──────────────────────────────
-    axes[0].plot(t, vb_meas, 'k-', linewidth=2, label='实测')
+    axes[0].plot(t, vb_meas, 'k-', linewidth=2, label='实测速度')
     axes[0].plot(t, vb_pred, 'b--', linewidth=1.5, label='模型预测')
     axes[0].set_ylabel('船速 (m/s)')
     axes[0].legend(loc='upper right', fontsize=8)
@@ -345,7 +340,7 @@ def plot_results_full(t, vb_pred, vb_meas, f_meas, x_bf, x_sb, theta, cs_theta):
     axes[1].grid(True, alpha=0.3)
 
     # ── 子图3：腿位移 ─────────────────────────────
-    axes[2].plot(t, x_bf, 'k-', linewidth=2, label='腿位移')
+    axes[2].plot(t, x_bf, 'k-', linewidth=2, label='实测腿位移')
     axes[2].set_ylabel('腿位移 (m)')
     axes[2].legend(loc='upper right', fontsize=8)
     mark_events(axes[2])
@@ -359,7 +354,7 @@ def plot_results_full(t, vb_pred, vb_meas, f_meas, x_bf, x_sb, theta, cs_theta):
     axes[3].grid(True, alpha=0.3)
 
     # ── 子图5：背位移 ─────────────────────────────
-    axes[4].plot(t, x_sb, 'k-', linewidth=2, label='背位移')
+    axes[4].plot(t, x_sb, 'k-', linewidth=2, label='实测背位移')
     axes[4].set_ylabel('背位移 (m)')
     axes[4].legend(loc='upper right', fontsize=8)
     mark_events(axes[4])
