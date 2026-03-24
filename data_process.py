@@ -118,6 +118,8 @@ if __name__ == '__main__':
         (raw_theta, angle, '桨角 (°)'),
     ]
 
+    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']  # Windows
+    plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
     fig, axes = plt.subplots(5, 1, figsize=(10, 12), sharex=True)
     for ax, (raw, unified, label) in zip(axes, datasets):
         t_r = [p[0] for p in raw]
@@ -134,8 +136,6 @@ if __name__ == '__main__':
         ax.grid(True, alpha=0.3)
 
     axes[-1].set_xlabel('时间 (s)')
-    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']  # Windows
-    plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
     plt.tight_layout()
     plt.savefig('time_axis_unification.png', dpi=150)
     plt.show()
