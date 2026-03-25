@@ -15,6 +15,7 @@ PARAMS = {
     's': 0.83,  # 内侧桨长 (m)
     'l': 1.805,  # 外侧桨长 (m)
     'C1': 3.16,  # 船体阻力系数
+    # 'C1': 2.80,  # 船体阻力系数
     'C2': 58.7,  # 桨叶阻力系数
     'r': 0.4,  # 质心高度比
     'd': 0.565,  # 桨锁到桨质心距离 (m)
@@ -26,7 +27,7 @@ PARAMS = {
 # ============================================================
 # 第一步：准备协调运动样条
 # ============================================================
-def prepare_splines(x_bf, x_sb, theta, t_common, params):
+def prepare_splines(x_bf, x_sb, theta, t_common):
     """
     由实测数据构建协调运动样条，并反推x_H/S
 
@@ -34,8 +35,8 @@ def prepare_splines(x_bf, x_sb, theta, t_common, params):
     -------
     cs_leg, cs_trunk, cs_arm : CubicSpline对象
     """
-    s = params['s']
-    dLF = params['dLF']
+    s = PARAMS['s']
+    dLF = PARAMS['dLF']
 
     # 转换为相对位移
     x_bf = x_bf - x_bf[0]
@@ -55,15 +56,15 @@ def prepare_splines(x_bf, x_sb, theta, t_common, params):
 # ============================================================
 # 第二步：由样条计算桨角及导数（Eq.8, 9）
 # ============================================================
-def compute_theta_from_splines(t, cs_leg, cs_trunk, cs_arm, params):
+def compute_theta_from_splines(t, cs_leg, cs_trunk, cs_arm):
     """
     由协调运动样条计算桨角θ及其导数
 
     注意：这里用实测θ的样条直接求导更准确
     此函数作为备用验证
     """
-    s = params['s']
-    dLF = params['dLF']
+    s = PARAMS['s']
+    dLF = PARAMS['dLF']
 
     xBF = cs_leg(t)
     xSB = cs_trunk(t)
@@ -95,20 +96,21 @@ def compute_theta_from_splines(t, cs_leg, cs_trunk, cs_arm, params):
 # ============================================================
 # 第三步：判断Drive/Recovery（Eq.16）
 # ============================================================
-def blade_normal_velocity(vb, theta, theta_dot, params):
+def blade_normal_velocity(vb, theta, theta_dot):
     """
     计算桨叶法向速度 v_O · ê_θ（Eq.16）
     Drive阶段：此值非零
     Recovery阶段：此值为零
     """
-    outer_oar_length = params['l']
+
+    outer_oar_length = PARAMS['l']
     return outer_oar_length * theta_dot + vb * np.cos(theta)
 
 
 # ============================================================
 # 第四步：ODE右端项（Eq.18）
 # ============================================================
-def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_theta, params):
+def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_theta):
     """
     计算 dv_b/dt（Eq.18右端项）
 
@@ -116,17 +118,13 @@ def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_theta, params):
     这比从x_H/S反推更准确
     """
 
-    # ── 安全检查：vb异常时立即返回 ──
-    if not np.isfinite(vb) or abs(vb) > 50.0:
-        return 0.0
-
-    mR = params['mR']
-    mb = params['mb']
-    mO = params['mO']
-    C1 = params['C1']
-    C2 = params['C2']
-    r = params['r']
-    d = params['d']
+    mR = PARAMS['mR']
+    mb = PARAMS['mb']
+    mO = PARAMS['mO']
+    C1 = PARAMS['C1']
+    C2 = PARAMS['C2']
+    r = PARAMS['r']
+    d = PARAMS['d']
 
     # 直接从实测θ样条获取（更准确）
     theta = float(cs_theta(t))
@@ -138,8 +136,10 @@ def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_theta, params):
     xSBdd = float(cs_trunk.derivative(2)(t))
 
     # 判断是否Drive（Eq.16）
-    v_normal = blade_normal_velocity(vb, theta, theta_dot, params)
-    in_drive = abs(v_normal) > 1e-4
+    v_normal = blade_normal_velocity(vb, theta, theta_dot)
+    # in_drive = abs(v_normal) > 1e-4
+    # 修改：用 θ̇ 符号判断，而不是 v_normal 阈值
+    in_drive = theta_dot < 0
 
     # 船体阻力（Eq.10）
     F_drag = -C1 * vb ** 2
@@ -164,10 +164,11 @@ def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_theta, params):
 # ============================================================
 # 第五步：RK4积分
 # ============================================================
-def rk4_integrate(cs_leg, cs_trunk, cs_theta, params, t_eval, vb0):
+def rk4_integrate(cs_leg, cs_trunk, cs_theta, t_eval, vb0):
     """
     用RK4积分Eq.18，得到船速时间历程
     """
+
     N = len(t_eval)
     h = t_eval[1] - t_eval[0]
     vb = vb0
@@ -177,10 +178,10 @@ def rk4_integrate(cs_leg, cs_trunk, cs_theta, params, t_eval, vb0):
         vb_traj[i] = vb
 
         # RK4四个斜率
-        k1 = compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_theta, params)
-        k2 = compute_dvb_dt(t + h / 2, vb + h / 2 * k1, cs_leg, cs_trunk, cs_theta, params)
-        k3 = compute_dvb_dt(t + h / 2, vb + h / 2 * k2, cs_leg, cs_trunk, cs_theta, params)
-        k4 = compute_dvb_dt(t + h, vb + h * k3, cs_leg, cs_trunk, cs_theta, params)
+        k1 = compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_theta)
+        k2 = compute_dvb_dt(t + h / 2, vb + h / 2 * k1, cs_leg, cs_trunk, cs_theta)
+        k3 = compute_dvb_dt(t + h / 2, vb + h / 2 * k2, cs_leg, cs_trunk, cs_theta)
+        k4 = compute_dvb_dt(t + h, vb + h * k3, cs_leg, cs_trunk, cs_theta)
 
         vb = vb + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
 
@@ -190,7 +191,7 @@ def rk4_integrate(cs_leg, cs_trunk, cs_theta, params, t_eval, vb0):
 # ============================================================
 # 第六步：寻找周期性初始速度（Appendix A.4）
 # ============================================================
-def find_periodic_vb0(cs_leg, cs_trunk, cs_theta, params, t_eval, vb_measured, tol=1e-6):
+def find_periodic_vb0(cs_leg, cs_trunk, cs_theta, t_eval, vb_measured, tol=1e-6):
     """
     用割线法找到满足 v_b(0) = v_b(T) 的初始速度
 
@@ -198,7 +199,7 @@ def find_periodic_vb0(cs_leg, cs_trunk, cs_theta, params, t_eval, vb_measured, t
     """
 
     def g(vb0):
-        traj = rk4_integrate(cs_leg, cs_trunk, cs_theta, params, t_eval, vb0)
+        traj = rk4_integrate(cs_leg, cs_trunk, cs_theta, t_eval, vb0)
         return traj[-1] - vb0
 
     # 用实测平均速度作为初始猜测
@@ -230,6 +231,7 @@ def compute_error_j(vb_pred, vb_meas):
     E = (1/N) Σ (pred - meas)² / Y*²
     其中 Y* = 平均船速
     """
+
     Y_star = np.mean(vb_meas)
     e = np.mean((vb_pred - vb_meas) ** 2) / Y_star ** 2
     return e
@@ -246,20 +248,21 @@ def run_direct_drive():
     theta = np.radians(theta_deg)  # 角度→弧度
     xBF = xBF - xBF[0]  # 转为相对位移
     xSB = xSB - xSB[0]  # 转为相对位移
-    T = t_common[-1] - t_common[0]
+    # T = t_common[-1] - t_common[0]
+    T = PARAMS['T']
 
     print(f"划桨周期 T = {T:.4f} s")
     print(f"实测平均船速 = {np.mean(vb_meas):.3f} m/s")
 
     # --- 构建样条 ---
-    cs_leg, cs_trunk, cs_arm = prepare_splines(xBF, xSB, theta, t_common, PARAMS)
+    cs_leg, cs_trunk, cs_arm = prepare_splines(xBF, xSB, theta, t_common)
     cs_theta = CubicSpline(t_common, theta)
 
     # --- 寻找周期性初始速度 ---
-    vb0 = find_periodic_vb0(cs_leg, cs_trunk, cs_theta, PARAMS, t_common, vb_meas)
+    vb0 = find_periodic_vb0(cs_leg, cs_trunk, cs_theta, t_common, vb_meas)
 
     # --- RK4积分 ---
-    vb_pred = rk4_integrate(cs_leg, cs_trunk, cs_theta, PARAMS, t_common, vb0)
+    vb_pred = rk4_integrate(cs_leg, cs_trunk, cs_theta, t_common, vb0)
 
     # --- 计算误差 ---
     E_vb = compute_error_j(vb_pred, vb_meas)
@@ -269,13 +272,12 @@ def run_direct_drive():
     print(f"论文trial b参考值：E ≈ 0.00051，残差 ≈ 0.08 m/s")
 
     # --- 可视化 ---
-    plot_results(t_common, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm, PARAMS)
-    # plot_results_full(t_common, vb_pred, vb_meas, F_meas, xBF, xSB, theta, cs_theta)
+    plot_results(t_common, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm)
 
     return vb_pred, E_vb
 
 
-def plot_results(t, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm, params):
+def plot_results(t, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm):
     """对照论文图4的格式绘图"""
     plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
     plt.rcParams['axes.unicode_minus'] = False
@@ -289,8 +291,7 @@ def plot_results(t, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm, params):
     axes[0].grid(True, alpha=0.3)
 
     # 桨角（验证θ导数是否合理）
-    theta_rad, theta_dot, theta_ddot = compute_theta_from_splines(t, cs_leg, cs_trunk, cs_arm, params)
-
+    theta_rad, theta_dot, theta_ddot = compute_theta_from_splines(t, cs_leg, cs_trunk, cs_arm)
     axes[1].plot(t, np.degrees(theta), 'k-', linewidth=2, label='实测桨角')
     axes[1].plot(t, np.degrees(theta_rad), 'r--', linewidth=1.5, label='模型预测')
     axes[1].set_ylabel('桨角 (°)')
@@ -300,69 +301,6 @@ def plot_results(t, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm, params):
     axes[-1].set_xlabel('时间 (s)')
     plt.tight_layout()
     plt.savefig('direct_drive_result.png', dpi=150)
-    plt.show()
-
-
-def plot_results_full(t, vb_pred, vb_meas, f_meas, x_bf, x_sb, theta, cs_theta):
-    """对照论文图4的完整格式绘图"""
-    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
-    plt.rcParams['axes.unicode_minus'] = False
-
-    fig, axes = plt.subplots(5, 1, figsize=(10, 14), sharex=True)
-
-    # 标记入水和出水时刻
-    theta_dot = cs_theta.derivative(1)(t)
-    v_normal = (PARAMS['l'] * theta_dot + vb_meas * np.cos(theta))
-    drive_mask = np.abs(v_normal) > 1e-4
-    transitions = np.diff(drive_mask.astype(int))
-    catch_idx = np.where(transitions > 0)[0]
-    release_idx = np.where(transitions < 0)[0]
-
-    def mark_events(ax):
-        for idx in catch_idx:
-            ax.axvline(t[idx], color='b', linestyle='--', linewidth=0.8, alpha=0.6, label='入水')
-        for idx in release_idx:
-            ax.axvline(t[idx], color='r', linestyle='--', linewidth=0.8, alpha=0.6, label='出水')
-
-    # ── 子图1：船速 ──────────────────────────────
-    axes[0].plot(t, vb_meas, 'k-', linewidth=2, label='实测速度')
-    axes[0].plot(t, vb_pred, 'b--', linewidth=1.5, label='模型预测')
-    axes[0].set_ylabel('船速 (m/s)')
-    axes[0].legend(loc='upper right', fontsize=8)
-    mark_events(axes[0])
-    axes[0].grid(True, alpha=0.3)
-
-    # ── 子图2：桨柄力 ─────────────────────────────
-    axes[1].plot(t, f_meas, 'k-', linewidth=2, label='实测桨柄力')
-    axes[1].set_ylabel('桨柄力 (N)')
-    axes[1].legend(loc='upper right', fontsize=8)
-    mark_events(axes[1])
-    axes[1].grid(True, alpha=0.3)
-
-    # ── 子图3：腿位移 ─────────────────────────────
-    axes[2].plot(t, x_bf, 'k-', linewidth=2, label='实测腿位移')
-    axes[2].set_ylabel('腿位移 (m)')
-    axes[2].legend(loc='upper right', fontsize=8)
-    mark_events(axes[2])
-    axes[2].grid(True, alpha=0.3)
-
-    # ── 子图4：桨角 ───────────────────────────────
-    axes[3].plot(t, np.degrees(theta), 'k-', linewidth=2, label='实测桨角')
-    axes[3].set_ylabel('桨角 (°)')
-    axes[3].legend(loc='upper right', fontsize=8)
-    mark_events(axes[3])
-    axes[3].grid(True, alpha=0.3)
-
-    # ── 子图5：背位移 ─────────────────────────────
-    axes[4].plot(t, x_sb, 'k-', linewidth=2, label='实测背位移')
-    axes[4].set_ylabel('背位移 (m)')
-    axes[4].legend(loc='upper right', fontsize=8)
-    mark_events(axes[4])
-    axes[4].grid(True, alpha=0.3)
-
-    axes[-1].set_xlabel('时间 (s)')
-    plt.tight_layout()
-    plt.savefig('direct_drive_result_full.png', dpi=150)
     plt.show()
 
 
