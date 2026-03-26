@@ -1,3 +1,6 @@
+import time
+
+import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.optimize import minimize
@@ -23,343 +26,448 @@ PARAMS = {
     'dLF': 0.0,  # 桨锁前后位置（初始估计）
 }
 
+N_KNOTS = 16
+# N_KNOTS = 6
 
-class RowingSimulator:
+# 全局计数器（在文件顶部定义）
+_call_count = [0]
+_start_time = [None]
+
+
+# ============================================================
+# 核心模块一：由节点值构建样条
+# ============================================================
+def build_splines(p_vec, t, n_knots=N_KNOTS):
     """
-    基于论文Cabrera et al. (2006)的划桨模型
-    通过最小化误差J来拟合协调运动
+    由优化参数向量构建三条协调运动样条
     """
+    leg_knots = p_vec[0: n_knots]
+    trunk_knots = p_vec[n_knots: 2 * n_knots]
+    arm_knots = p_vec[2 * n_knots: 3 * n_knots]
+    d_LF = p_vec[3 * n_knots]
 
-    def __init__(self, measured_data):
-        """
-        Parameters
-        ----------
-        measured_data : dict
-            实测数据，键为变量名，值为numpy数组
-        """
-        self.p = PARAMS
-        self.data = measured_data
-        self.T = measured_data['t'][-1] - measured_data['t'][0]
-        self.N = len(measured_data['t'])
-        self.n_knots = 16
+    t_knots = np.linspace(0, t, n_knots, endpoint=False)
 
-        # 特征值Y*（用于归一化误差）
-        self.char_values = {
-            'vb': np.mean(measured_data['vb']),
-            'F': np.max(measured_data['F']),
-            'xBF': np.ptp(measured_data['xBF']),
-            'xSB': np.ptp(measured_data['xSB']),
-            'theta': np.ptp(measured_data['theta']),
-        }
+    def make_periodic_spline(knots):
+        # 首尾闭合以满足周期性
+        t_cl = np.append(t_knots, t)
+        v_cl = np.append(knots, knots[0])
+        return CubicSpline(t_cl, v_cl, bc_type='periodic')
 
-    # ----------------------------------------------------------
-    # 1. 由节点值构建样条
-    # ----------------------------------------------------------
+    cs_leg = make_periodic_spline(leg_knots)
+    cs_trunk = make_periodic_spline(trunk_knots)
+    cs_arm = make_periodic_spline(arm_knots)
 
-    def build_splines(self, p_vec):
-        """由优化参数向量构建三条协调运动样条"""
-        n = self.n_knots
-        t_knots = np.linspace(0, self.T, n, endpoint=False)
+    return cs_leg, cs_trunk, cs_arm, d_LF
 
-        # 解包参数向量
-        leg_knots = p_vec[0:n]
-        trunk_knots = p_vec[n:2 * n]
-        arm_knots = p_vec[2 * n:3 * n]
-        d_LF = p_vec[3 * n]
 
-        # 构建周期性三次样条
-        def make_spline(knots):
-            t_cl = np.append(t_knots, self.T)
-            v_cl = np.append(knots, knots[0])
-            return CubicSpline(t_cl, v_cl, bc_type='periodic')
+# ============================================================
+# 核心模块二：由样条计算桨角（Eq.8, 9）
+# ============================================================
+def compute_theta(t, cs_leg, cs_trunk, cs_arm, d_lf, params):
+    """
+    由协调运动样条通过Eq.8反推桨角θ及其导数
 
-        cs_leg = make_spline(leg_knots)
-        cs_trunk = make_spline(trunk_knots)
-        cs_arm = make_spline(arm_knots)
+    注意：与直接驱动不同，这里没有实测θ可用
+    θ完全由协调运动反推
+    """
+    s = params['s']
 
-        return cs_leg, cs_trunk, cs_arm, d_LF
+    x_bf = float(cs_leg(t))
+    x_sb = float(cs_trunk(t))
+    x_hs = float(cs_arm(t))
 
-    # ----------------------------------------------------------
-    # 2. 计算桨角及其导数（Eq.8, 9）
-    # ----------------------------------------------------------
+    x_bf_d = float(cs_leg.derivative(1)(t))
+    x_sb_d = float(cs_trunk.derivative(1)(t))
+    x_hs_d = float(cs_arm.derivative(1)(t))
 
-    def compute_theta(self, cs_leg, cs_trunk, cs_arm, d_lf, t):
-        """由协调运动计算桨角θ及其一阶、二阶导数"""
-        s = self.p['s']
+    x_bf_dd = float(cs_leg.derivative(2)(t))
+    x_sb_dd = float(cs_trunk.derivative(2)(t))
+    x_hs_dd = float(cs_arm.derivative(2)(t))
 
-        x_bf = cs_leg(t)
-        x_bf_d = cs_leg.derivative(1)(t)
-        x_sb = cs_trunk(t)
-        x_sb_d = cs_trunk.derivative(1)(t)
-        x_hs = cs_arm(t)
-        x_hs_d = cs_arm.derivative(1)(t)
+    # Eq.8
+    sin_theta = (d_lf + x_hs - x_sb - x_bf) / s
+    sin_theta = np.clip(sin_theta, -1.0, 1.0)
+    theta = np.arcsin(sin_theta)
+    cos_theta = np.cos(theta)
 
-        x_bf_dd = cs_leg.derivative(2)(t)
-        x_sb_dd = cs_trunk.derivative(2)(t)
-        x_hs_dd = cs_arm.derivative(2)(t)
-
-        # Eq.8：sinθ = (d_LF + x_HS - x_SB - x_BF) / s
-        sin_theta = (d_lf + x_hs - x_sb - x_bf) / s
-        sin_theta = np.clip(sin_theta, -1, 1)
-        theta = np.arcsin(sin_theta)
-
-        # Eq.9：θ̇
-        cos_theta = np.cos(theta)
+    # Eq.9：θ̇
+    if abs(cos_theta) < 1e-6:
+        theta_dot = 0.0
+    else:
         theta_dot = (x_hs_d - x_bf_d - x_sb_d) / (s * cos_theta)
 
-        # Eq.9：θ̈
-        theta_ddot = ((x_hs_dd - x_bf_dd - x_sb_dd) + s * theta_dot ** 2 * np.sin(theta)) / (s * cos_theta)
+    # Eq.9：θ̈
+    if abs(cos_theta) < 1e-6:
+        theta_ddot = 0.0
+    else:
+        theta_ddot = (((x_hs_dd - x_bf_dd - x_sb_dd) + s * theta_dot ** 2 * np.sin(theta)) / (s * cos_theta))
 
-        return theta, theta_dot, theta_ddot
+    return theta, theta_dot, theta_ddot
 
-    # ----------------------------------------------------------
-    # 3. ODE右端项（Eq.18）
-    # ----------------------------------------------------------
 
-    def oar_force(self, vb, theta, theta_dot, in_drive):
-        """计算桨叶推力（Model 1，Eq.11）"""
-        if not in_drive:
-            return 0.0
-        L = self.p['l']
-        C2 = self.p['C2']
-        v_normal = L * theta_dot + vb * np.cos(theta)
-        return C2 * v_normal ** 2
+# ============================================================
+# 核心模块三：ODE右端项（Eq.18）
+# ============================================================
+def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_arm, d_lf, params):
+    """
+    与直接驱动的区别：
+    θ来自Eq.8反推，而不是实测θ的样条
+    """
+    if not np.isfinite(vb) or abs(vb) > 50.0:
+        return 0.0
 
-    def dvb_dt(self, t, vb, cs_leg, cs_trunk, cs_arm, d_lf, in_drive):
-        """Eq.18的右端项"""
-        mR = self.p['mR']
-        mb = self.p['mb']
-        mO = self.p['mO']
-        C1 = self.p['C1']
-        r = self.p['r']
-        d = self.p['d']
+    mr = params['mR']
+    mb = params['mb']
+    mO = params['mO']
+    c1 = params['C1']
+    c2 = params['C2']
+    r = params['r']
+    d = params['d']
 
-        theta, theta_dot, theta_ddot = self.compute_theta(cs_leg, cs_trunk, cs_arm, d_lf, t)
+    theta, theta_dot, theta_ddot = compute_theta(t, cs_leg, cs_trunk, cs_arm, d_lf, params)
 
-        xBFdd = cs_leg.derivative(2)(t)
-        xSBdd = cs_trunk.derivative(2)(t)
+    x_bf_dd = float(cs_leg.derivative(2)(t))
+    x_sb_dd = float(cs_trunk.derivative(2)(t))
 
-        F_drag = -C1 * vb ** 2
-        F_oar = self.oar_force(vb, theta, theta_dot, in_drive)
+    # Drive/Recovery：用θ̇符号判断
+    v_normal = params['l'] * theta_dot + vb * np.cos(theta)
+    # in_drive = theta_dot < 0
+    in_drive = v_normal > 1e-6
 
-        numerator = (
-                F_drag
-                + F_oar * np.cos(theta)
-                - mR * (xBFdd + r * xSBdd)
-                - mO * d * (theta_ddot * np.cos(theta) - theta_dot ** 2 * np.sin(theta))
-        )
-        return numerator / (mR + mb + mO)
+    F_drag = -c1 * vb ** 2
 
-    # ----------------------------------------------------------
-    # 4. RK4积分
-    # ----------------------------------------------------------
+    if in_drive:
+        F_oar = c2 * v_normal ** 2
+    else:
+        F_oar = 0.0
 
-    def integrate_rk4(self, p_vec):
-        """
-        用RK4积分Eq.18，返回船速时间历程
-        同时处理Drive/Recovery切换
-        """
-        cs_leg, cs_trunk, cs_arm, d_LF = self.build_splines(p_vec)
-        t_eval = np.linspace(0, self.T, self.N)
-        h = t_eval[1] - t_eval[0]
+    numerator = (
+            F_drag
+            + F_oar * np.cos(theta)
+            - mr * (x_bf_dd + r * x_sb_dd)
+            - mO * d * (theta_ddot * np.cos(theta) - theta_dot ** 2 * np.sin(theta))
+    )
 
-        # 寻找周期性初始速度（割线法）
-        vb0 = self._find_periodic_vb0(cs_leg, cs_trunk, cs_arm, d_LF)
+    result = numerator / (mr + mb + mO)
+    return result if np.isfinite(result) else 0.0
 
-        vb_traj = np.zeros(self.N)
-        vb = vb0
-        in_drive = False
 
-        for i, t in enumerate(t_eval):
-            vb_traj[i] = vb
+# ============================================================
+# 核心模块四：RK4积分
+# ============================================================
+def rk4_integrate(cs_leg, cs_trunk, cs_arm, d_lf, params, t_eval, vb0):
+    N = len(t_eval)
+    h = t_eval[1] - t_eval[0]
+    vb = vb0
+    vb_traj = np.zeros(N)
 
-            # 判断Drive/Recovery（Eq.16）
-            _, theta_dot, _ = self.compute_theta(cs_leg, cs_trunk, cs_arm, d_LF, t)
-            theta, _, _ = self.compute_theta(cs_leg, cs_trunk, cs_arm, d_LF, t)
-            v_normal = (self.p['l'] * theta_dot + vb * np.cos(theta))
-            # in_drive = abs(v_normal) > 1e-6
-            in_drive = theta_dot > 0
+    for i, t in enumerate(t_eval):
+        vb_traj[i] = vb
 
-            # RK4四步
-            def f(t_, v_):
-                return self.dvb_dt(t_, v_, cs_leg, cs_trunk, cs_arm, d_LF, in_drive)
+        k1 = compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_arm, d_lf, params)
+        k2 = compute_dvb_dt(t + h / 2, vb + h / 2 * k1, cs_leg, cs_trunk, cs_arm, d_lf, params)
+        k3 = compute_dvb_dt(t + h / 2, vb + h / 2 * k2, cs_leg, cs_trunk, cs_arm, d_lf, params)
+        k4 = compute_dvb_dt(t + h, vb + h * k3, cs_leg, cs_trunk, cs_arm, d_lf, params)
 
-            k1 = f(t, vb)
-            k2 = f(t + h / 2, vb + h / 2 * k1)
-            k3 = f(t + h / 2, vb + h / 2 * k2)
-            k4 = f(t + h, vb + h * k3)
+        vb = vb + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
 
-            vb = vb + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+    return vb_traj
 
-        return vb_traj
 
-    def _find_periodic_vb0(self, cs_leg, cs_trunk, cs_arm, d_lf, tol=1e-6):
-        """割线法寻找周期性初始船速（Appendix A.4）"""
+# ============================================================
+# 核心模块五：割线法求周期性初始速度
+# ============================================================
+def find_periodic_vb0(cs_leg, cs_trunk, cs_arm, d_lf, params, t_eval, vb_init, tol=1e-6):
+    def g(vb0):
+        traj = rk4_integrate(cs_leg, cs_trunk, cs_arm, d_lf, params, t_eval, vb0)
+        return traj[-1] - vb0
 
-        def g(vb0):
-            # 简化版：只积分一个周期，返回终末速度-初始速度
-            p_tmp = np.zeros(3 * self.n_knots + 1)
-            # 此处传入完整p_vec（简化示意）
-            vb_traj = self._single_integrate(vb0, cs_leg, cs_trunk, cs_arm, d_lf)
-            return vb_traj[-1] - vb0
+    v1, v2 = vb_init, vb_init + 0.1
 
-        v1, v2 = 4.0, 4.1
-        for _ in range(20):
-            g1, g2 = g(v1), g(v2)
-            if abs(g2 - g1) < 1e-12:
-                break
-            v3 = v2 - g2 * (v2 - v1) / (g2 - g1)
-            if abs(g2) < tol:
-                return v2
-            v1, v2 = v2, v3
-        return v2
+    for _ in range(20):
+        g1, g2 = g(v1), g(v2)
+        if not np.isfinite(g1) or not np.isfinite(g2):
+            return vb_init  # 积分发散时返回初始猜测
+        if abs(g2 - g1) < 1e-12:
+            break
+        v3 = v2 - g2 * (v2 - v1) / (g2 - g1)
+        if not np.isfinite(v3) or abs(v3) > 20.0:
+            v3 = vb_init
+        if abs(g2) < tol:
+            return v2
+        v1, v2 = v2, v3
 
-    def _single_integrate(self, vb0, cs_leg, cs_trunk, cs_arm, d_lf):
-        """单次RK4积分（供割线法调用）"""
-        t_eval = np.linspace(0, self.T, self.N)
-        h = t_eval[1] - t_eval[0]
-        vb = vb0
-        vb_traj = []
+    return v2
 
-        for t in t_eval:
-            vb_traj.append(vb)
-            theta, theta_dot, _ = self.compute_theta(cs_leg, cs_trunk, cs_arm, d_lf, t)
-            v_normal = (self.p['l'] * theta_dot + vb * np.cos(theta))
-            in_drive = abs(v_normal) > 1e-6
 
-            def f(t_, v_):
-                return self.dvb_dt(t_, v_, cs_leg, cs_trunk, cs_arm, d_lf, in_drive)
+# ============================================================
+# 核心模块六：误差函数J（Eq. A.6）
+# ============================================================
+def compute_j(p_vec, t_eval, measured, params, fit_vars, char_values, t):
+    """计算误差 J"""
 
-            k1 = f(t, vb)
-            k2 = f(t + h / 2, vb + h / 2 * k1)
-            k3 = f(t + h / 2, vb + h / 2 * k2)
-            k4 = f(t + h, vb + h * k3)
-            vb = vb + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+    # ── 进度监控 ──
+    _call_count[0] += 1
+    if _start_time[0] is None:
+        _start_time[0] = time.time()
+    call_start = time.time()
 
-        return np.array(vb_traj)
+    try:
+        cs_leg, cs_trunk, cs_arm, d_lf = build_splines(p_vec, t)
 
-    # ----------------------------------------------------------
-    # 5. 误差函数J（Eq. A.6）
-    # ----------------------------------------------------------
+        # 寻找周期性初始速度
+        vb0 = find_periodic_vb0(cs_leg, cs_trunk, cs_arm, d_lf, params, t_eval, vb_init=np.mean(measured['vb']))
 
-    def compute_j(self, p_vec, fit_vars):
-        """
-        计算误差J
+        # RK4积分得到预测船速
+        vb_pred = rk4_integrate(cs_leg, cs_trunk, cs_arm, d_lf, params, t_eval, vb0)
 
-        Parameters
-        ----------
-        p_vec : 优化参数向量
-        fit_vars : list，参与拟合的变量名
-                   可选：'vb', 'F', 'xBF', 'xSB', 'theta'
-        """
-        try:
-            # 运行模型
-            vb_pred = self.integrate_rk4(p_vec)
+        total_J = 0.0
+        for var in fit_vars:
+            if var == 'vb':
+                predicted = vb_pred
+                measured_ = measured['vb']
+            elif var == 'theta':
+                # 从样条重建θ时间历程
+                predicted = np.array([compute_theta(t, cs_leg, cs_trunk, cs_arm, d_lf, params)[0] for t in t_eval])
+                measured_ = measured['theta']
+            elif var == 'xBF':
+                predicted = cs_leg(t_eval)
+                measured_ = measured['xBF']
+            elif var == 'xSB':
+                predicted = cs_trunk(t_eval)
+                measured_ = measured['xSB']
+            else:
+                continue
 
-            total_J = 0.0
-            n_vars = len(fit_vars)
+            E_j = (np.mean((predicted - measured_) ** 2) / char_values[var] ** 2)
+            total_J += E_j
 
-            for var in fit_vars:
-                measured = self.data[var]
-                char_val = self.char_values[var]
+        result_J = total_J / len(fit_vars)
 
-                if var == 'vb':
-                    predicted = vb_pred
-                elif var == 'theta':
-                    # 从样条重建预测桨角
-                    cs_leg, cs_trunk, cs_arm, d_LF = self.build_splines(p_vec)
-                    t_eval = np.linspace(0, self.T, self.N)
-                    predicted, _, _ = self.compute_theta(cs_leg, cs_trunk, cs_arm, d_LF, t_eval)
-                # F_hand等其他变量需要矩阵求逆（Eq.17）
-                # 此处暂时省略，后续补充
+        # ── 每10次调用打印一次 ──
+        if _call_count[0] % 10 == 0:
+            elapsed = time.time() - _start_time[0]
+            per_call = time.time() - call_start
+            print(f"  调用 {_call_count[0]:4d} | "
+                  f"J = {result_J:.6f} | "
+                  f"vb0 = {vb0:.3f} m/s | "
+                  f"单次耗时 {per_call:.2f}s | "
+                  f"累计 {elapsed:.0f}s")
 
-                E_j = (np.mean((predicted - measured) ** 2) / char_val ** 2)
-                total_J += E_j
+        return result_J
 
-            return total_J / n_vars
+    except Exception:
+        return 1e6  # 数值错误时返回大值
 
-        except Exception:
-            return 1e6  # 数值错误时返回大值
 
-    # ----------------------------------------------------------
-    # 6. 优化入口
-    # ----------------------------------------------------------
+# ============================================================
+# 核心模块七：初始参数猜测
+# ============================================================
+def init_p0(measured, t, params, n_knots=N_KNOTS):
+    """
+    用实测数据插值到节点，作为优化起点
+    这比随机初始化收敛快得多
+    """
+    t = measured['t']
+    t_k = np.linspace(0, t, n_knots, endpoint=False)
 
-    def fit(self, fit_vars=None, nm=5):
-        """
-        最小化误差J，寻找最优协调运动节点值
+    # ── 诊断打印 ──
+    print(f"n_knots = {n_knots}")
+    print(f"t 长度  = {len(t)}")
+    print(f"t_k 形状 = {t_k.shape}")
 
-        Parameters
-        ----------
-        fit_vars : 参与拟合的变量，默认全部5个
-        nm : 拟合变量数量
-        """
-        if fit_vars is None:
-            fit_vars = ['vb', 'F', 'xBF', 'xSB', 'theta']
+    # 腿和躯干：直接从实测数据插值
+    leg_k = CubicSpline(t, measured['xBF'])(t_k)
+    trunk_k = CubicSpline(t, measured['xSB'])(t_k)
 
-        # 初始猜测：用实测数据插值到节点
-        p0 = self._init_from_measured()
+    # 手臂：由Eq.8从实测θ反推
+    s = params['s']
+    dLF = params['dLF']
+    xHS = (s * np.sin(measured['theta']) - dLF + measured['xSB'] + measured['xBF'])
+    arm_k = CubicSpline(t, xHS)(t_k)
 
-        print(f"开始优化，拟合变量：{fit_vars}")
-        print(f"优化参数数量：{len(p0)}")
+    # ✅ 修复：确保所有数组是1维
+    leg_k = np.asarray(leg_k).flatten()
+    trunk_k = np.asarray(trunk_k).flatten()
+    arm_k = np.asarray(arm_k).flatten()
 
-        iteration = [0]
-        j_history = []
+    p0 = np.concatenate([leg_k, trunk_k, arm_k, [dLF]])
+    print(f"p0 shape: {p0.shape}（预期：({3 * n_knots + 1}) = ({3 * N_KNOTS + 1})）")
+    return p0
 
-        def callback(p_vec):
-            iteration[0] += 1
-            J = self.compute_j(p_vec, fit_vars)
-            j_history.append(J)
-            if iteration[0] % 10 == 0:
-                print(f"  迭代 {iteration[0]:4d}:  J = {J:.8f}")
 
-        result = minimize(
-            self.compute_j,
-            p0,
-            args=(fit_vars,),
-            method='L-BFGS-B',  # 论文使用BFGS
-            callback=callback,
-            options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-8, }
-        )
+# ============================================================
+# 主程序：最小化J
+# ============================================================
+def run_minimize_j():
+    # --- 读取并预处理数据 ---
+    vb_meas, F_meas, xBF, xSB, theta_deg, t_common = process_data(50)
 
-        print(f"\n优化完成：J_min = {result.fun:.8f}")
-        print(f"对照论文trial a参考值：J ≈ 0.00024")
+    theta = np.radians(theta_deg)
+    xBF = xBF - xBF[0]
+    xSB = xSB - xSB[0]
+    T = t_common[-1] - t_common[0]
 
-        return result.x, j_history
+    measured = {
+        't': t_common,
+        'vb': vb_meas,
+        'xBF': xBF,
+        'xSB': xSB,
+        'theta': theta,
+    }
 
-    def _init_from_measured(self):
-        """用实测数据插值生成初始节点值"""
-        n = self.n_knots
-        t_k = np.linspace(0, self.T, n, endpoint=False)
-        t = self.data['t']
+    # 特征值 Y*（用于归一化误差）
+    char_values = {
+        'vb': np.mean(vb_meas),
+        'theta': np.ptp(theta),
+        'xBF': np.ptp(xBF),
+        'xSB': np.ptp(xSB),
+    }
 
-        leg_k = CubicSpline(t, self.data['xBF'])(t_k)
-        trunk_k = CubicSpline(t, self.data['xSB'])(t_k)
+    # --- 初始参数 ---
+    p0 = init_p0(measured, T, PARAMS)
+    print(f"优化参数数量：{len(p0)}")
+    print(f"初始J（用实测数据插值）：", end=' ')
+    J0 = compute_j(
+        p0, t_common, measured, PARAMS,
+        fit_vars=['vb', 'theta', 'xBF', 'xSB'],
+        char_values=char_values, t=T)
+    print(f"{J0:.6f}")
 
-        # x_H/S 由Eq.8反推
-        s = self.p['s']
-        dLF = 0.0
-        xHS = (s * np.sin(self.data['theta']) - dLF + self.data['xSB'] + self.data['xBF'])
-        arm_k = CubicSpline(t, xHS)(t_k)
+    # ── 优化前：先测一次单次调用耗时 ──
+    print("预热测试（测量单次J计算耗时）...")
+    t_test = time.time()
+    J_test = compute_j(
+        p0, t_common, measured, PARAMS,
+        fit_vars=['theta', 'xBF', 'xSB'],
+        char_values=char_values, t=T)
+    t_single = time.time() - t_test
+    print(f"单次J计算耗时：{t_single:.2f} s")
+    print(f"初始 J = {J_test:.6f}")
 
-        p0 = np.concatenate([leg_k, trunk_k, arm_k, [dLF]])
-        return p0
+    # L-BFGS-B 通常需要 500~2000 次J计算
+    est_min = t_single * 1000 / 60
+    est_max = t_single * 3000 / 60
+    print(f"预估总时间：{est_min:.0f} ~ {est_max:.0f} 分钟")
+    print(f"（L-BFGS-B 通常需要 1000~3000 次J计算）\n")
+
+    # ── 重置计数器 ──
+    _call_count[0] = 0
+    _start_time[0] = None
+
+    # --- 优化 ---
+    iteration = [0]
+    j_history = []
+
+    def callback(p_vec):
+        iteration[0] += 1
+        J = compute_j(p_vec, t_common, measured, PARAMS,
+                      fit_vars=['vb', 'theta', 'xBF', 'xSB'],
+                      char_values=char_values, t=T)
+        j_history.append(J)
+        if iteration[0] % 10 == 0:
+            print(f"  迭代 {iteration[0]:4d}:  J = {J:.8f}")
+
+    print("开始优化...")
+    opt_start = time.time()
+    result = minimize(
+        compute_j,
+        p0,
+        args=(
+            t_common, measured, PARAMS,
+            ['vb', 'theta', 'xBF', 'xSB'],  # 拟合的参数
+            char_values, T
+        ),
+        method='L-BFGS-B',
+        # method='Nelder-Mead',
+        callback=callback,
+        options={'maxiter': 300, 'ftol': 1e-10}
+    )
+
+    opt_total = time.time() - opt_start
+    print(f"\n优化完成！")
+    print(f"总耗时：{opt_total / 60:.1f} 分钟")
+    print(f"总调用次数：{_call_count[0]}")
+    print(f"J_min = {result.fun:.8f}")
+    print(f"收敛状态：{result.message}")
+
+    # --- 用最优参数做最终预测 ---
+    p_opt = result.x
+    cs_leg, cs_trunk, cs_arm, d_LF = build_splines(p_opt, T)
+
+    vb0 = find_periodic_vb0(cs_leg, cs_trunk, cs_arm, d_LF, PARAMS, t_common, np.mean(vb_meas))
+    vb_pred = rk4_integrate(cs_leg, cs_trunk, cs_arm, d_LF, PARAMS, t_common, vb0)
+
+    # --- 计算最终误差 ---
+    Y_star = np.mean(vb_meas)
+    E_vb = np.mean((vb_pred - vb_meas) ** 2) / Y_star ** 2
+    residual = np.mean(np.abs(vb_pred - vb_meas))
+    print(f"E(v_b)  = {E_vb:.8f}")
+    print(f"平均残差 = {residual:.4f} m/s")
+    print(f"论文trial b参考：E ≈ 0.00051，残差 ≈ 0.08 m/s")
+
+    # --- 绘图 ---
+    plot_results(t_common, vb_pred, vb_meas, xBF, xSB, theta, cs_leg, cs_trunk, cs_arm, j_history)
+
+    return vb_pred, p_opt, j_history
+
+
+# ============================================================
+# 绘图
+# ============================================================
+def plot_results(t, vb_pred, vb_meas, x_bf, x_sb, theta, cs_leg, cs_trunk, cs_arm, j_history):
+    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
+    plt.rcParams['axes.unicode_minus'] = False
+    fig, axes = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
+
+    # 船速
+    axes[0].plot(t, vb_meas, 'k-', lw=2, label='实测')
+    axes[0].plot(t, vb_pred, 'b--', lw=1.5, label='模型预测')
+    axes[0].set_ylabel('船速 (m/s)')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    # 腿位移
+    axes[1].plot(t, x_bf, 'k-', lw=2, label='实测')
+    axes[1].plot(t, cs_leg(t), 'b--', lw=1.5, label='模型')
+    axes[1].set_ylabel('腿位移 (m)')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    # 背位移
+    axes[2].plot(t, x_sb, 'k-', lw=2, label='实测')
+    axes[2].plot(t, cs_trunk(t), 'b--', lw=1.5, label='模型')
+    axes[2].set_ylabel('背位移 (m)')
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+
+    # 桨角
+    theta_pred = np.array([compute_theta(ti, cs_leg, cs_trunk, cs_arm, 0.0, PARAMS)[0] for ti in t])
+    axes[3].plot(t, np.degrees(theta), 'k-', lw=2, label='实测')
+    axes[3].plot(t, np.degrees(theta_pred), 'b--', lw=1.5, label='模型')
+    axes[3].set_ylabel('桨角 (°)')
+    axes[3].legend()
+    axes[3].grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel('时间 (s)')
+    plt.tight_layout()
+    plt.savefig('minimize_J_result.png', dpi=150)
+    plt.show()
+
+    # J收敛曲线
+    if j_history:
+        plt.figure(figsize=(8, 4))
+        plt.plot(j_history)
+        plt.xlabel('迭代次数')
+        plt.ylabel('误差 J')
+        plt.title('优化收敛过程')
+        plt.grid(True, alpha=0.3)
+        plt.yscale('log')
+        plt.tight_layout()
+        plt.savefig('J_convergence.png', dpi=150)
+        plt.show()
 
 
 if __name__ == '__main__':
-    # 读取实测数据
-    vB, F, xBF, xSB, theta_deg, T = process_data()
-    Theta = np.radians(theta_deg)
-
-    # 打包数据
-    Measured = {
-        't': T, 'vb': vB, 'F': F,
-        'xBF': xBF, 'xSB': xSB, 'theta': Theta
-    }
-
-    # 创建模拟器并优化
-    sim = RowingSimulator(Measured)
-
-    # 对应论文trial a：拟合全部5个变量
-    # p_opt, J_history = sim.fit(fit_vars=['vb', 'F', 'xBF', 'xSB', 'theta'])
-    p_opt, J_history = sim.fit(fit_vars=['vb'])
+    vb_predicted, p_optimize, J_history = run_minimize_j()

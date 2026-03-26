@@ -293,7 +293,7 @@ def plot_results(t, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm):
 
     axes[-1].set_xlabel('时间 (s)')
     plt.tight_layout()
-    plt.savefig('direct_drive_result.png', dpi=150)
+    # plt.savefig('direct_drive_result.png', dpi=150)
     plt.show()
 
 

@@ -75,11 +75,10 @@ def unify_time_axis(raw_data, n_points=50):
     return t_uniform, v_uniform, cs, T
 
 
-def process_data():
+def process_data(n_points=1000):
     # ============================================================
     # 对5个变量分别处理
     # ============================================================
-    n_points = 1000
     t_vb, vb, cs_vb, T_vb = unify_time_axis(raw_vb, n_points)
     t_F, F, cs_F, T_F = unify_time_axis(raw_F, n_points)
     t_xBF, xBF, cs_xBF, T_xBF = unify_time_axis(raw_xBF, n_points)
