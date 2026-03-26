@@ -63,7 +63,7 @@ def unify_time_axis(raw_data, n_points=50):
     # 确定时间范围
     t_start = t_raw[0]
     t_end = t_raw[-1]
-    T = t_end - t_start  # 划桨周期
+    t = t_end - t_start  # 划桨周期
 
     # 构建三次样条（用原始不均匀点）
     cs = CubicSpline(t_raw, v_raw, bc_type='periodic')
@@ -72,18 +72,18 @@ def unify_time_axis(raw_data, n_points=50):
     t_uniform = np.linspace(t_start, t_end, n_points)
     v_uniform = cs(t_uniform)
 
-    return t_uniform, v_uniform, cs, T
+    return t_uniform, v_uniform, cs, t
 
 
 def process_data(n_points=1000):
     # ============================================================
     # 对5个变量分别处理
     # ============================================================
-    t_vb, vb, cs_vb, T_vb = unify_time_axis(raw_vb, n_points)
-    t_F, F, cs_F, T_F = unify_time_axis(raw_F, n_points)
-    t_xBF, xBF, cs_xBF, T_xBF = unify_time_axis(raw_xBF, n_points)
-    t_xSB, xSB, cs_xSB, T_xSB = unify_time_axis(raw_xSB, n_points)
-    t_theta, theta, cs_theta, T_theta = unify_time_axis(raw_theta, n_points)
+    t_vb, vb, cs_vb, time_vb = unify_time_axis(raw_vb, n_points)
+    t_f, f, cs_f, time_f = unify_time_axis(raw_F, n_points)
+    t_x_bf, x_bf, cs_x_bf, time_x_bf = unify_time_axis(raw_xBF, n_points)
+    t_x_sb, x_sb, cs_x_sb, time_x_sb = unify_time_axis(raw_xSB, n_points)
+    t_theta, theta, cs_theta, time_theta = unify_time_axis(raw_theta, n_points)
 
     # ============================================================
     # 统一到同一个时间轴（取交集范围）
@@ -91,27 +91,27 @@ def process_data(n_points=1000):
 
     # 各传感器的时间范围可能略有不同
     # 取所有数据共同覆盖的时间范围
-    t_start_common = max(t_vb[0], t_F[0], t_xBF[0], t_xSB[0], t_theta[0])
-    t_end_common = min(t_vb[-1], t_F[-1], t_xBF[-1], t_xSB[-1], t_theta[-1])
+    t_start_common = max(t_vb[0], t_f[0], t_x_bf[0], t_x_sb[0], t_theta[0])
+    t_end_common = min(t_vb[-1], t_f[-1], t_x_bf[-1], t_x_sb[-1], t_theta[-1])
 
     # 最终统一时间轴
     t_common = np.linspace(t_start_common, t_end_common, n_points)
 
     # 用各自的样条在统一时间轴上求值
     vb_final = cs_vb(t_common)
-    F_final = cs_F(t_common)
-    xBF_final = cs_xBF(t_common)
-    xSB_final = cs_xSB(t_common)
+    f_final = cs_f(t_common)
+    x_bf_final = cs_x_bf(t_common)
+    x_sb_final = cs_x_sb(t_common)
     theta_final = cs_theta(t_common)
 
-    return vb_final, F_final, xBF_final, xSB_final, theta_final, t_common
+    return vb_final, f_final, x_bf_final, x_sb_final, theta_final, t_common
 
 
 if __name__ == '__main__':
-    v_b, f, x_BF, x_SB, angle, t = process_data()
+    v_b, F, x_BF, x_SB, angle, T = process_data()
     datasets = [
         (raw_vb, v_b, '船速 (m/s)'),
-        (raw_F, f, '桨柄力 (N)'),
+        (raw_F, F, '桨柄力 (N)'),
         (raw_xBF, x_BF, '腿位移 (m)'),
         (raw_xSB, x_SB, '背位移 (m)'),
         (raw_theta, angle, '桨角 (°)'),
@@ -128,7 +128,7 @@ if __name__ == '__main__':
         ax.scatter(t_r, v_r, s=10, color='gray', alpha=0.5, label='原始数据')
 
         # 插值后均匀数据（线）
-        ax.plot(t, unified, color='blue', linewidth=1.5, label='插值结果')
+        ax.plot(T, unified, color='blue', linewidth=1.5, label='插值结果')
 
         ax.set_ylabel(label)
         ax.legend(loc='upper right', fontsize=8)

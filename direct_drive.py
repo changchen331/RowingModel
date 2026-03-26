@@ -115,7 +115,7 @@ def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_theta):
     """
     mr = PARAMS['mR']
     mb = PARAMS['mb']
-    mO = PARAMS['mO']
+    mo = PARAMS['mO']
     c1 = PARAMS['C1']
     c2 = PARAMS['C2']
     r = PARAMS['r']
@@ -136,23 +136,23 @@ def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_theta):
     in_drive = theta_dot < 0
 
     # 船体阻力（Eq.10）
-    F_drag = -c1 * vb ** 2
+    f_drag = -c1 * vb ** 2
 
     # 桨叶推力（Eq.11，仅Drive阶段）
     if in_drive:
-        F_oar = c2 * v_normal ** 2
+        f_oar = c2 * v_normal ** 2
     else:
-        F_oar = 0.0
+        f_oar = 0.0
 
     # Eq.18分子
     numerator = (
-            F_drag
-            + F_oar * np.cos(theta)
+            f_drag
+            + f_oar * np.cos(theta)
             - mr * (x_bf_dd + r * x_sb_dd)
-            - mO * d * (theta_ddot * np.cos(theta) - theta_dot ** 2 * np.sin(theta))
+            - mo * d * (theta_ddot * np.cos(theta) - theta_dot ** 2 * np.sin(theta))
     )
 
-    return numerator / (mr + mb + mO)
+    return numerator / (mr + mb + mo)
 
 
 # ============================================================
@@ -162,10 +162,10 @@ def rk4_integrate(cs_leg, cs_trunk, cs_theta, t_eval, vb0):
     """
     用RK4积分Eq.18，得到船速时间历程
     """
-    N = len(t_eval)
+    n = len(t_eval)
     h = t_eval[1] - t_eval[0]
     vb = vb0
-    vb_traj = np.zeros(N)
+    vb_traj = np.zeros(n)
 
     for i, t in enumerate(t_eval):
         vb_traj[i] = vb
@@ -184,7 +184,7 @@ def rk4_integrate(cs_leg, cs_trunk, cs_theta, t_eval, vb0):
 # ============================================================
 # 第六步：寻找周期性初始速度（Appendix A.4）
 # ============================================================
-def find_periodic_vb0(cs_leg, cs_trunk, cs_theta, t_eval, vb_measured, tol=1e-6):
+def find_periodic_vb0(cs_leg, cs_trunk, cs_theta, t_eval, vb_measured, tol=1e-10):
     """
     用割线法找到满足 v_b(0) = v_b(T) 的初始速度
 
@@ -200,8 +200,7 @@ def find_periodic_vb0(cs_leg, cs_trunk, cs_theta, t_eval, vb_measured, tol=1e-6)
     v2 = v1 + 0.1
 
     print("寻找周期性初始速度...")
-    # for i in range(20):
-    for i in range(10):
+    for i in range(20):
         g1, g2 = g(v1), g(v2)
         if abs(g2 - g1) < 1e-12:
             break
@@ -225,8 +224,8 @@ def compute_error_j(vb_pred, vb_meas):
     E = (1/N) Σ (pred - meas)² / Y*²
     其中 Y* = 平均船速
     """
-    Y_star = np.mean(vb_meas)
-    e = np.mean((vb_pred - vb_meas) ** 2) / Y_star ** 2
+    y_star = np.mean(vb_meas)
+    e = np.mean((vb_pred - vb_meas) ** 2) / y_star ** 2
     return e
 
 
@@ -235,20 +234,20 @@ def compute_error_j(vb_pred, vb_meas):
 # ============================================================
 def run_direct_drive():
     # --- 读取数据 ---
-    vb_meas, F_meas, xBF, xSB, theta_deg, t_common = process_data()
+    vb_meas, f_meas, x_bf, x_sb, theta_deg, t_common = process_data()
 
     # --- 单位转换 ---
     theta = np.radians(theta_deg)  # 角度→弧度
-    xBF = xBF - xBF[0]  # 转为相对位移
-    xSB = xSB - xSB[0]  # 转为相对位移
-    # T = t_common[-1] - t_common[0]
-    T = PARAMS['T']
+    x_bf = x_bf - x_bf[0]  # 转为相对位移
+    x_sb = x_sb - x_sb[0]  # 转为相对位移
+    t = t_common[-1] - t_common[0]
+    # t = PARAMS['T']
 
-    print(f"划桨周期 T = {T:.4f} s")
+    print(f"划桨周期 T = {t:.4f} s")
     print(f"实测平均船速 = {np.mean(vb_meas):.3f} m/s")
 
     # --- 构建样条 ---
-    cs_leg, cs_trunk, cs_arm = prepare_splines(xBF, xSB, theta, t_common)
+    cs_leg, cs_trunk, cs_arm = prepare_splines(x_bf, x_sb, theta, t_common)
     cs_theta = CubicSpline(t_common, theta, bc_type='periodic')
 
     # --- 寻找周期性初始速度 ---
@@ -258,16 +257,16 @@ def run_direct_drive():
     vb_pred = rk4_integrate(cs_leg, cs_trunk, cs_theta, t_common, vb0)
 
     # --- 计算误差 ---
-    E_vb = compute_error_j(vb_pred, vb_meas)
+    e_vb = compute_error_j(vb_pred, vb_meas)
     residual = np.mean(np.abs(vb_pred - vb_meas))
-    print(f"\n误差 E(v_b) = {E_vb:.8f}")
+    print(f"\n误差 E(v_b) = {e_vb:.8f}")
     print(f"平均残差    = {residual:.4f} m/s")
     print(f"论文trial b参考值：E ≈ 0.00051，残差 ≈ 0.08 m/s")
 
     # --- 可视化 ---
     plot_results(t_common, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm)
 
-    return vb_pred, E_vb
+    return vb_pred, e_vb
 
 
 def plot_results(t, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm):
@@ -293,7 +292,7 @@ def plot_results(t, vb_pred, vb_meas, theta, cs_leg, cs_trunk, cs_arm):
 
     axes[-1].set_xlabel('时间 (s)')
     plt.tight_layout()
-    # plt.savefig('direct_drive_result.png', dpi=150)
+    plt.savefig('direct_drive_result.png', dpi=150)
     plt.show()
 
 

@@ -30,8 +30,8 @@ N_KNOTS = 16
 # N_KNOTS = 6
 
 # 全局计数器（在文件顶部定义）
-_call_count = [0]
-_start_time = [None]
+call_count = [0]
+start_time = [0]
 
 
 # ============================================================
@@ -44,7 +44,7 @@ def build_splines(p_vec, t, n_knots=N_KNOTS):
     leg_knots = p_vec[0: n_knots]
     trunk_knots = p_vec[n_knots: 2 * n_knots]
     arm_knots = p_vec[2 * n_knots: 3 * n_knots]
-    d_LF = p_vec[3 * n_knots]
+    d_lf = p_vec[3 * n_knots]
 
     t_knots = np.linspace(0, t, n_knots, endpoint=False)
 
@@ -58,7 +58,7 @@ def build_splines(p_vec, t, n_knots=N_KNOTS):
     cs_trunk = make_periodic_spline(trunk_knots)
     cs_arm = make_periodic_spline(arm_knots)
 
-    return cs_leg, cs_trunk, cs_arm, d_LF
+    return cs_leg, cs_trunk, cs_arm, d_lf
 
 
 # ============================================================
@@ -119,7 +119,7 @@ def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_arm, d_lf, params):
 
     mr = params['mR']
     mb = params['mb']
-    mO = params['mO']
+    mo = params['mO']
     c1 = params['C1']
     c2 = params['C2']
     r = params['r']
@@ -135,21 +135,21 @@ def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_arm, d_lf, params):
     # in_drive = theta_dot < 0
     in_drive = v_normal > 1e-6
 
-    F_drag = -c1 * vb ** 2
+    f_drag = -c1 * vb ** 2
 
     if in_drive:
-        F_oar = c2 * v_normal ** 2
+        f_oar = c2 * v_normal ** 2
     else:
-        F_oar = 0.0
+        f_oar = 0.0
 
     numerator = (
-            F_drag
-            + F_oar * np.cos(theta)
+            f_drag
+            + f_oar * np.cos(theta)
             - mr * (x_bf_dd + r * x_sb_dd)
-            - mO * d * (theta_ddot * np.cos(theta) - theta_dot ** 2 * np.sin(theta))
+            - mo * d * (theta_ddot * np.cos(theta) - theta_dot ** 2 * np.sin(theta))
     )
 
-    result = numerator / (mr + mb + mO)
+    result = numerator / (mr + mb + mo)
     return result if np.isfinite(result) else 0.0
 
 
@@ -157,10 +157,10 @@ def compute_dvb_dt(t, vb, cs_leg, cs_trunk, cs_arm, d_lf, params):
 # 核心模块四：RK4积分
 # ============================================================
 def rk4_integrate(cs_leg, cs_trunk, cs_arm, d_lf, params, t_eval, vb0):
-    N = len(t_eval)
+    n = len(t_eval)
     h = t_eval[1] - t_eval[0]
     vb = vb0
-    vb_traj = np.zeros(N)
+    vb_traj = np.zeros(n)
 
     for i, t in enumerate(t_eval):
         vb_traj[i] = vb
@@ -208,9 +208,9 @@ def compute_j(p_vec, t_eval, measured, params, fit_vars, char_values, t):
     """计算误差 J"""
 
     # ── 进度监控 ──
-    _call_count[0] += 1
-    if _start_time[0] is None:
-        _start_time[0] = time.time()
+    call_count[0] += 1
+    if start_time[0] == 0:
+        start_time[0] = time.time()
     call_start = time.time()
 
     try:
@@ -222,7 +222,7 @@ def compute_j(p_vec, t_eval, measured, params, fit_vars, char_values, t):
         # RK4积分得到预测船速
         vb_pred = rk4_integrate(cs_leg, cs_trunk, cs_arm, d_lf, params, t_eval, vb0)
 
-        total_J = 0.0
+        total_j = 0.0
         for var in fit_vars:
             if var == 'vb':
                 predicted = vb_pred
@@ -240,22 +240,22 @@ def compute_j(p_vec, t_eval, measured, params, fit_vars, char_values, t):
             else:
                 continue
 
-            E_j = (np.mean((predicted - measured_) ** 2) / char_values[var] ** 2)
-            total_J += E_j
+            e_j = (np.mean((predicted - measured_) ** 2) / char_values[var] ** 2)
+            total_j += e_j
 
-        result_J = total_J / len(fit_vars)
+        result_j = total_j / len(fit_vars)
 
         # ── 每10次调用打印一次 ──
-        if _call_count[0] % 10 == 0:
-            elapsed = time.time() - _start_time[0]
+        if call_count[0] % 10 == 0:
+            elapsed = time.time() - float(start_time[0])
             per_call = time.time() - call_start
-            print(f"  调用 {_call_count[0]:4d} | "
-                  f"J = {result_J:.6f} | "
+            print(f"  调用 {call_count[0]:4d} | "
+                  f"J = {result_j:.6f} | "
                   f"vb0 = {vb0:.3f} m/s | "
                   f"单次耗时 {per_call:.2f}s | "
                   f"累计 {elapsed:.0f}s")
 
-        return result_J
+        return result_j
 
     except Exception:
         return 1e6  # 数值错误时返回大值
@@ -283,16 +283,16 @@ def init_p0(measured, t, params, n_knots=N_KNOTS):
 
     # 手臂：由Eq.8从实测θ反推
     s = params['s']
-    dLF = params['dLF']
-    xHS = (s * np.sin(measured['theta']) - dLF + measured['xSB'] + measured['xBF'])
-    arm_k = CubicSpline(t, xHS)(t_k)
+    d_lf = params['dLF']
+    x_hs = (s * np.sin(measured['theta']) - d_lf + measured['xSB'] + measured['xBF'])
+    arm_k = CubicSpline(t, x_hs)(t_k)
 
     # ✅ 修复：确保所有数组是1维
     leg_k = np.asarray(leg_k).flatten()
     trunk_k = np.asarray(trunk_k).flatten()
     arm_k = np.asarray(arm_k).flatten()
 
-    p0 = np.concatenate([leg_k, trunk_k, arm_k, [dLF]])
+    p0 = np.concatenate([leg_k, trunk_k, arm_k, [d_lf]])
     print(f"p0 shape: {p0.shape}（预期：({3 * n_knots + 1}) = ({3 * N_KNOTS + 1})）")
     return p0
 
@@ -302,18 +302,18 @@ def init_p0(measured, t, params, n_knots=N_KNOTS):
 # ============================================================
 def run_minimize_j():
     # --- 读取并预处理数据 ---
-    vb_meas, F_meas, xBF, xSB, theta_deg, t_common = process_data(50)
+    vb_meas, f_meas, x_bf, x_sb, theta_deg, t_common = process_data(50)
 
     theta = np.radians(theta_deg)
-    xBF = xBF - xBF[0]
-    xSB = xSB - xSB[0]
-    T = t_common[-1] - t_common[0]
+    x_bf = x_bf - x_bf[0]
+    x_sb = x_sb - x_sb[0]
+    t = t_common[-1] - t_common[0]
 
     measured = {
         't': t_common,
         'vb': vb_meas,
-        'xBF': xBF,
-        'xSB': xSB,
+        'xBF': x_bf,
+        'xSB': x_sb,
         'theta': theta,
     }
 
@@ -321,30 +321,30 @@ def run_minimize_j():
     char_values = {
         'vb': np.mean(vb_meas),
         'theta': np.ptp(theta),
-        'xBF': np.ptp(xBF),
-        'xSB': np.ptp(xSB),
+        'xBF': np.ptp(x_bf),
+        'xSB': np.ptp(x_sb),
     }
 
     # --- 初始参数 ---
-    p0 = init_p0(measured, T, PARAMS)
+    p0 = init_p0(measured, t, PARAMS)
     print(f"优化参数数量：{len(p0)}")
     print(f"初始J（用实测数据插值）：", end=' ')
-    J0 = compute_j(
+    j0 = compute_j(
         p0, t_common, measured, PARAMS,
         fit_vars=['vb', 'theta', 'xBF', 'xSB'],
-        char_values=char_values, t=T)
-    print(f"{J0:.6f}")
+        char_values=char_values, t=t)
+    print(f"{j0:.6f}")
 
     # ── 优化前：先测一次单次调用耗时 ──
     print("预热测试（测量单次J计算耗时）...")
     t_test = time.time()
-    J_test = compute_j(
+    j_test = compute_j(
         p0, t_common, measured, PARAMS,
         fit_vars=['theta', 'xBF', 'xSB'],
-        char_values=char_values, t=T)
+        char_values=char_values, t=t)
     t_single = time.time() - t_test
     print(f"单次J计算耗时：{t_single:.2f} s")
-    print(f"初始 J = {J_test:.6f}")
+    print(f"初始 J = {j_test:.6f}")
 
     # L-BFGS-B 通常需要 500~2000 次J计算
     est_min = t_single * 1000 / 60
@@ -353,8 +353,8 @@ def run_minimize_j():
     print(f"（L-BFGS-B 通常需要 1000~3000 次J计算）\n")
 
     # ── 重置计数器 ──
-    _call_count[0] = 0
-    _start_time[0] = None
+    call_count[0] = 0
+    start_time[0] = 0
 
     # --- 优化 ---
     iteration = [0]
@@ -362,12 +362,12 @@ def run_minimize_j():
 
     def callback(p_vec):
         iteration[0] += 1
-        J = compute_j(p_vec, t_common, measured, PARAMS,
+        j = compute_j(p_vec, t_common, measured, PARAMS,
                       fit_vars=['vb', 'theta', 'xBF', 'xSB'],
-                      char_values=char_values, t=T)
-        j_history.append(J)
+                      char_values=char_values, t=t)
+        j_history.append(j)
         if iteration[0] % 10 == 0:
-            print(f"  迭代 {iteration[0]:4d}:  J = {J:.8f}")
+            print(f"  迭代 {iteration[0]:4d}:  J = {j:.8f}")
 
     print("开始优化...")
     opt_start = time.time()
@@ -377,7 +377,7 @@ def run_minimize_j():
         args=(
             t_common, measured, PARAMS,
             ['vb', 'theta', 'xBF', 'xSB'],  # 拟合的参数
-            char_values, T
+            char_values, t
         ),
         method='L-BFGS-B',
         # method='Nelder-Mead',
@@ -388,27 +388,27 @@ def run_minimize_j():
     opt_total = time.time() - opt_start
     print(f"\n优化完成！")
     print(f"总耗时：{opt_total / 60:.1f} 分钟")
-    print(f"总调用次数：{_call_count[0]}")
+    print(f"总调用次数：{call_count[0]}")
     print(f"J_min = {result.fun:.8f}")
     print(f"收敛状态：{result.message}")
 
     # --- 用最优参数做最终预测 ---
     p_opt = result.x
-    cs_leg, cs_trunk, cs_arm, d_LF = build_splines(p_opt, T)
+    cs_leg, cs_trunk, cs_arm, d_lf = build_splines(p_opt, t)
 
-    vb0 = find_periodic_vb0(cs_leg, cs_trunk, cs_arm, d_LF, PARAMS, t_common, np.mean(vb_meas))
-    vb_pred = rk4_integrate(cs_leg, cs_trunk, cs_arm, d_LF, PARAMS, t_common, vb0)
+    vb0 = find_periodic_vb0(cs_leg, cs_trunk, cs_arm, d_lf, PARAMS, t_common, np.mean(vb_meas))
+    vb_pred = rk4_integrate(cs_leg, cs_trunk, cs_arm, d_lf, PARAMS, t_common, vb0)
 
     # --- 计算最终误差 ---
-    Y_star = np.mean(vb_meas)
-    E_vb = np.mean((vb_pred - vb_meas) ** 2) / Y_star ** 2
+    y_star = np.mean(vb_meas)
+    e_vb = np.mean((vb_pred - vb_meas) ** 2) / y_star ** 2
     residual = np.mean(np.abs(vb_pred - vb_meas))
-    print(f"E(v_b)  = {E_vb:.8f}")
+    print(f"E(v_b)  = {e_vb:.8f}")
     print(f"平均残差 = {residual:.4f} m/s")
     print(f"论文trial b参考：E ≈ 0.00051，残差 ≈ 0.08 m/s")
 
     # --- 绘图 ---
-    plot_results(t_common, vb_pred, vb_meas, xBF, xSB, theta, cs_leg, cs_trunk, cs_arm, j_history)
+    plot_results(t_common, vb_pred, vb_meas, x_bf, x_sb, theta, cs_leg, cs_trunk, cs_arm, j_history)
 
     return vb_pred, p_opt, j_history
 
