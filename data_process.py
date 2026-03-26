@@ -66,7 +66,7 @@ def unify_time_axis(raw_data, n_points=50):
     T = t_end - t_start  # 划桨周期
 
     # 构建三次样条（用原始不均匀点）
-    cs = CubicSpline(t_raw, v_raw)
+    cs = CubicSpline(t_raw, v_raw, bc_type='periodic')
 
     # 在均匀时间轴上重新采样
     t_uniform = np.linspace(t_start, t_end, n_points)
@@ -79,12 +79,12 @@ def process_data():
     # ============================================================
     # 对5个变量分别处理
     # ============================================================
-
-    t_vb, vb, cs_vb, T_vb = unify_time_axis(raw_vb)
-    t_F, F, cs_F, T_F = unify_time_axis(raw_F)
-    t_xBF, xBF, cs_xBF, T_xBF = unify_time_axis(raw_xBF)
-    t_xSB, xSB, cs_xSB, T_xSB = unify_time_axis(raw_xSB)
-    t_theta, theta, cs_theta, T_theta = unify_time_axis(raw_theta)
+    n_points = 1000
+    t_vb, vb, cs_vb, T_vb = unify_time_axis(raw_vb, n_points)
+    t_F, F, cs_F, T_F = unify_time_axis(raw_F, n_points)
+    t_xBF, xBF, cs_xBF, T_xBF = unify_time_axis(raw_xBF, n_points)
+    t_xSB, xSB, cs_xSB, T_xSB = unify_time_axis(raw_xSB, n_points)
+    t_theta, theta, cs_theta, T_theta = unify_time_axis(raw_theta, n_points)
 
     # ============================================================
     # 统一到同一个时间轴（取交集范围）
@@ -96,7 +96,7 @@ def process_data():
     t_end_common = min(t_vb[-1], t_F[-1], t_xBF[-1], t_xSB[-1], t_theta[-1])
 
     # 最终统一时间轴
-    t_common = np.linspace(t_start_common, t_end_common, 50)
+    t_common = np.linspace(t_start_common, t_end_common, n_points)
 
     # 用各自的样条在统一时间轴上求值
     vb_final = cs_vb(t_common)
@@ -137,5 +137,5 @@ if __name__ == '__main__':
 
     axes[-1].set_xlabel('时间 (s)')
     plt.tight_layout()
-    plt.savefig('time_axis_unification.png', dpi=150)
+    # plt.savefig('time_axis_unification.png', dpi=150)
     plt.show()

@@ -4,6 +4,25 @@ from scipy.optimize import minimize
 
 from data_process import process_data
 
+# ============================================================
+# 模型常数（Table 1，单人艇）
+# ============================================================
+PARAMS = {
+    'T': 1.94,  # 划桨周期 (s)
+    'mR': 75.0,  # 划桨者质量 (kg)
+    'mb': 19.7,  # 船体质量 (kg)
+    'mO': 1.2,  # 桨质量 (kg)
+    's': 0.83,  # 内侧桨长 (m)
+    'l': 1.805,  # 外侧桨长 (m)
+    'C1': 3.16,  # 船体阻力系数
+    # 'C1': 2.80,  # 船体阻力系数
+    'C2': 58.7,  # 桨叶阻力系数
+    'r': 0.4,  # 质心高度比
+    'd': 0.565,  # 桨锁到桨质心距离 (m)
+    'IG': 0.85,  # 桨转动惯量 (kg·m²)
+    'dLF': 0.0,  # 桨锁前后位置（初始估计）
+}
+
 
 class RowingSimulator:
     """
@@ -11,16 +30,14 @@ class RowingSimulator:
     通过最小化误差J来拟合协调运动
     """
 
-    def __init__(self, params, measured_data):
+    def __init__(self, measured_data):
         """
         Parameters
         ----------
-        params : dict
-            模型物理常数（来自Table 1）
         measured_data : dict
             实测数据，键为变量名，值为numpy数组
         """
-        self.p = params
+        self.p = PARAMS
         self.data = measured_data
         self.T = measured_data['t'][-1] - measured_data['t'][0]
         self.N = len(measured_data['t'])
@@ -66,32 +83,32 @@ class RowingSimulator:
     # 2. 计算桨角及其导数（Eq.8, 9）
     # ----------------------------------------------------------
 
-    def compute_theta(self, cs_leg, cs_trunk, cs_arm, d_LF, t):
+    def compute_theta(self, cs_leg, cs_trunk, cs_arm, d_lf, t):
         """由协调运动计算桨角θ及其一阶、二阶导数"""
         s = self.p['s']
 
-        xBF = cs_leg(t)
-        xBFd = cs_leg.derivative(1)(t)
-        xSB = cs_trunk(t)
-        xSBd = cs_trunk.derivative(1)(t)
-        xHS = cs_arm(t)
-        xHSd = cs_arm.derivative(1)(t)
+        x_bf = cs_leg(t)
+        x_bf_d = cs_leg.derivative(1)(t)
+        x_sb = cs_trunk(t)
+        x_sb_d = cs_trunk.derivative(1)(t)
+        x_hs = cs_arm(t)
+        x_hs_d = cs_arm.derivative(1)(t)
 
-        xBFdd = cs_leg.derivative(2)(t)
-        xSBdd = cs_trunk.derivative(2)(t)
-        xHSdd = cs_arm.derivative(2)(t)
+        x_bf_dd = cs_leg.derivative(2)(t)
+        x_sb_dd = cs_trunk.derivative(2)(t)
+        x_hs_dd = cs_arm.derivative(2)(t)
 
         # Eq.8：sinθ = (d_LF + x_HS - x_SB - x_BF) / s
-        sin_theta = (d_LF + xHS - xSB - xBF) / s
+        sin_theta = (d_lf + x_hs - x_sb - x_bf) / s
         sin_theta = np.clip(sin_theta, -1, 1)
         theta = np.arcsin(sin_theta)
 
         # Eq.9：θ̇
         cos_theta = np.cos(theta)
-        theta_dot = (xHSd - xBFd - xSBd) / (s * cos_theta)
+        theta_dot = (x_hs_d - x_bf_d - x_sb_d) / (s * cos_theta)
 
         # Eq.9：θ̈
-        theta_ddot = ((xHSdd - xBFdd - xSBdd) + s * theta_dot ** 2 * np.sin(theta)) / (s * cos_theta)
+        theta_ddot = ((x_hs_dd - x_bf_dd - x_sb_dd) + s * theta_dot ** 2 * np.sin(theta)) / (s * cos_theta)
 
         return theta, theta_dot, theta_ddot
 
@@ -160,7 +177,8 @@ class RowingSimulator:
             _, theta_dot, _ = self.compute_theta(cs_leg, cs_trunk, cs_arm, d_LF, t)
             theta, _, _ = self.compute_theta(cs_leg, cs_trunk, cs_arm, d_LF, t)
             v_normal = (self.p['l'] * theta_dot + vb * np.cos(theta))
-            in_drive = abs(v_normal) > 1e-6
+            # in_drive = abs(v_normal) > 1e-6
+            in_drive = theta_dot > 0
 
             # RK4四步
             def f(t_, v_):
@@ -286,12 +304,12 @@ class RowingSimulator:
         print(f"优化参数数量：{len(p0)}")
 
         iteration = [0]
-        J_history = []
+        j_history = []
 
         def callback(p_vec):
             iteration[0] += 1
             J = self.compute_j(p_vec, fit_vars)
-            J_history.append(J)
+            j_history.append(J)
             if iteration[0] % 10 == 0:
                 print(f"  迭代 {iteration[0]:4d}:  J = {J:.8f}")
 
@@ -301,17 +319,13 @@ class RowingSimulator:
             args=(fit_vars,),
             method='L-BFGS-B',  # 论文使用BFGS
             callback=callback,
-            options={
-                'maxiter': 500,
-                'ftol': 1e-10,
-                'gtol': 1e-8,
-            }
+            options={'maxiter': 500, 'ftol': 1e-10, 'gtol': 1e-8, }
         )
 
         print(f"\n优化完成：J_min = {result.fun:.8f}")
         print(f"对照论文trial a参考值：J ≈ 0.00024")
 
-        return result.x, J_history
+        return result.x, j_history
 
     def _init_from_measured(self):
         """用实测数据插值生成初始节点值"""
@@ -325,10 +339,7 @@ class RowingSimulator:
         # x_H/S 由Eq.8反推
         s = self.p['s']
         dLF = 0.0
-        xHS = (s * np.sin(self.data['theta'])
-               - dLF
-               + self.data['xSB']
-               + self.data['xBF'])
+        xHS = (s * np.sin(self.data['theta']) - dLF + self.data['xSB'] + self.data['xBF'])
         arm_k = CubicSpline(t, xHS)(t_k)
 
         p0 = np.concatenate([leg_k, trunk_k, arm_k, [dLF]])
@@ -337,24 +348,18 @@ class RowingSimulator:
 
 if __name__ == '__main__':
     # 读取实测数据
-    vb, F, xBF, xSB, theta_deg, t = process_data()
-    theta = np.radians(theta_deg)
+    vB, F, xBF, xSB, theta_deg, T = process_data()
+    Theta = np.radians(theta_deg)
 
     # 打包数据
-    measured = {
-        't': t, 'vb': vb, 'F': F,
-        'xBF': xBF, 'xSB': xSB, 'theta': theta
-    }
-
-    # 模型常数（Table 1，单人艇）
-    params = {
-        'T': 1.94, 'mR': 75.0, 'mb': 19.7, 'mO': 1.2,
-        's': 0.83, 'l': 1.805, 'C1': 3.16,
-        'C2': 58.7, 'r': 0.4, 'd': 0.565,
+    Measured = {
+        't': T, 'vb': vB, 'F': F,
+        'xBF': xBF, 'xSB': xSB, 'theta': Theta
     }
 
     # 创建模拟器并优化
-    sim = RowingSimulator(params, measured)
+    sim = RowingSimulator(Measured)
 
     # 对应论文trial a：拟合全部5个变量
-    p_opt, J_history = sim.fit(fit_vars=['vb', 'F', 'xBF', 'xSB', 'theta'])
+    # p_opt, J_history = sim.fit(fit_vars=['vb', 'F', 'xBF', 'xSB', 'theta'])
+    p_opt, J_history = sim.fit(fit_vars=['vb'])
